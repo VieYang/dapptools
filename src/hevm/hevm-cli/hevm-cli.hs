@@ -215,7 +215,7 @@ main = do
     root = fromMaybe "." (dappRoot cmd)
   case cmd of
     Version {} -> putStrLn (showVersion Paths.version)
-    Symbolic {} -> launchSymbolic cmd
+    Symbolic {} -> launchSymbolic cmd >>= print
     Exec {} ->
       launchExec cmd
     VmTest {} ->
@@ -324,8 +324,8 @@ symbolEVM = do x <- symbolic "x"
                pure (x,y)
 
 
-launchSymbolic :: Command Options.Unwrapped -> IO ()
-launchSymbolic cmd = do (x,y) <- runSMT symbolEVM
+launchSymbolic :: Command Options.Unwrapped -> IO ThmResult
+launchSymbolic cmd = prove $ \x y ->
                         let vm1 = EVM.makeVm $ EVM.VMOpts
                               {   EVM.vmoptCode         = hexByteString "--code" (strip0x (code cmd))
                               , EVM.vmoptCalldata      = toBytes y <> toBytes x
@@ -345,7 +345,17 @@ launchSymbolic cmd = do (x,y) <- runSMT symbolEVM
                               , EVM.vmoptSchedule      = FeeSchedule.istanbul
                               , EVM.vmoptCreate        = False --create cmd
                               }
-                        void (EVM.TTY.runFromVM vm1)
+                            postvm = execState exec vm1
+                        in case view EVM.result postvm of
+                              Nothing ->
+                                sFalse --error "internal error; no EVM result"
+                              Just (EVM.VMFailure (EVM.Revert msg)) -> do
+                                sFalse --die . show . ByteStringS $ msg
+                              Just (EVM.VMFailure err) -> do
+                                sFalse --die . show $ err
+                              Just (EVM.VMSuccess msg) -> do
+                                x + (y :: SWord 256) .== (fromBytes msg)
+--                                print res
 
 dappCoverage :: UnitTestOptions -> Mode -> String -> IO ()
 dappCoverage = error ""
@@ -401,7 +411,7 @@ launchExec cmd = do
         Just (EVM.VMFailure err) -> do
           die . show $ err
         Just (EVM.VMSuccess msg) -> do
-          putStrLn . show . ByteStringS $ msg
+          putStrLn . show . ByteStringS $ EVM.forceLitBytes msg
           case state cmd of
             Nothing -> pure ()
             Just path ->
